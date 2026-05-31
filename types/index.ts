@@ -33,6 +33,12 @@ export interface AnchorRate {
   updatedAt: Date;
   /** Discriminates the origin of the rate data. */
   source: 'sep38' | 'sep24-fee' | 'unavailable';
+  /**
+   * SEP-38 firm quote id, when this rate originated from a quote server.
+   * Two anchors that proxy the same liquidity pool can return the same id;
+   * the rates engine dedupes on this field. Absent for non-SEP-38 sources.
+   */
+  quoteId?: string;
 }
 
 /** The result of comparing all anchor rates for a single corridor. */
