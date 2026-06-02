@@ -10,8 +10,8 @@ const CREATE_TABLE_SQL = `
     intentHash  TEXT    NOT NULL PRIMARY KEY,
     anchorId    TEXT    NOT NULL,
     filled      INTEGER NOT NULL,
-    settleMs    REAL,
-    slippage    REAL,
+    disputed    BOOLEAN NOT NULL DEFAULT FALSE,
+    disputed_reason TEXT,
     recordedAt  INTEGER NOT NULL
   )
 `
@@ -37,13 +37,14 @@ export function openDb(path: string = ':memory:'): ReputationDb {
 export function appendRow(db: ReputationDb, row: OutcomeRow): void {
   const stmt = db.prepare(`
     INSERT OR REPLACE INTO outcome_rows
-      (intentHash, anchorId, filled, settleMs, slippage, recordedAt)
+      (intentHash, anchorId, filled, settleMs, slippage, recordedAt, disputed, disputed_reason)
     VALUES
-      (@intentHash, @anchorId, @filled, @settleMs, @slippage, @recordedAt)
+      (@intentHash, @anchorId, @filled, @settleMs, @slippage, @recordedAt, @disputed, @disputed_reason)
   `)
   stmt.run({
     ...row,
-    filled: row.filled ? 1 : 0,
+    disputed: row.disputed ?? false,
+    disputed_reason: row.disputed_reason ?? null,
   })
 }
 
@@ -72,5 +73,7 @@ export function queryRows(db: ReputationDb, anchorId: string): OutcomeRow[] {
   return rows.map((r) => ({
     ...r,
     filled: r.filled === 1,
+    disputed: r.disputed === 1,
+    disputed_reason: r.disputed_reason ?? null,
   }))
 }

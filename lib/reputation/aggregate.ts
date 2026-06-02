@@ -201,6 +201,10 @@ export interface OutcomeRow {
   slippage: number | null
   /** Unix timestamp (ms) when the row was recorded. */
   recordedAt: number
+  /** Flag indicating if the outcome was disputed */
+  disputed?: boolean
+  /** Optional reason for dispute */
+  disputed_reason?: string
 }
 
 /** Rolling window in days — 7, 30, or 90. */
