@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { ANCHORS, CORRIDORS } from '@/constants';
+import { withRequestLogger } from '@/lib/logger';
 import type { ApiError } from '@/types';
 
 // ─── Query param schema ────────────────────────────────────────────────────────
@@ -106,46 +107,52 @@ function etagFor(corridor: string | undefined, generatedAt: string): string {
 // ─── Route handler ────────────────────────────────────────────────────────────
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
-  const { searchParams } = request.nextUrl;
+  return withRequestLogger(request, 'api.reputation.leaderboard', async (logger) => {
+    const { searchParams } = request.nextUrl;
 
-  const rawParams = {
-    corridor: searchParams.get('corridor') ?? undefined,
-  };
+    const rawParams = {
+      corridor: searchParams.get('corridor') ?? undefined,
+    };
 
-  const parsed = LeaderboardQuerySchema.safeParse(rawParams);
-  if (!parsed.success) {
-    const first = parsed.error.issues[0];
-    return NextResponse.json<ApiError>(
-      {
-        code: 'VALIDATION_ERROR',
-        message: first?.message ?? 'Invalid query parameters',
+    const parsed = LeaderboardQuerySchema.safeParse(rawParams);
+    if (!parsed.success) {
+      const first = parsed.error.issues[0];
+      logger.warn({ event: 'validation_failed', issues: parsed.error.issues });
+      return NextResponse.json<ApiError>(
+        {
+          code: 'VALIDATION_ERROR',
+          message: first?.message ?? 'Invalid query parameters',
+        },
+        { status: 400 }
+      );
+    }
+
+    const { corridor } = parsed.data;
+    logger.info({ event: 'leaderboard_requested', corridor });
+
+    const generatedAt = new Date().toISOString();
+    const leaderboard = buildLeaderboard(corridor);
+
+    const etag = etagFor(corridor, generatedAt);
+
+    // Honour conditional GET
+    if (request.headers.get('if-none-match') === etag) {
+      logger.info({ event: 'cache_hit', etag });
+      return new NextResponse(null, { status: 304, headers: { ETag: etag } });
+    }
+
+    const body: LeaderboardResponse = {
+      leaderboard,
+      corridor: corridor ?? null,
+      generatedAt,
+    };
+
+    return NextResponse.json<LeaderboardResponse>(body, {
+      status: 200,
+      headers: {
+        'Cache-Control': `public, max-age=${CACHE_MAX_AGE}, s-maxage=${CACHE_MAX_AGE}`,
+        ETag: etag,
       },
-      { status: 400 }
-    );
-  }
-
-  const { corridor } = parsed.data;
-  const generatedAt = new Date().toISOString();
-  const leaderboard = buildLeaderboard(corridor);
-
-  const etag = etagFor(corridor, generatedAt);
-
-  // Honour conditional GET
-  if (request.headers.get('if-none-match') === etag) {
-    return new NextResponse(null, { status: 304, headers: { ETag: etag } });
-  }
-
-  const body: LeaderboardResponse = {
-    leaderboard,
-    corridor: corridor ?? null,
-    generatedAt,
-  };
-
-  return NextResponse.json<LeaderboardResponse>(body, {
-    status: 200,
-    headers: {
-      'Cache-Control': `public, max-age=${CACHE_MAX_AGE}, s-maxage=${CACHE_MAX_AGE}`,
-      ETag: etag,
-    },
-  });
+    });
+  })
 }

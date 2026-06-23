@@ -9,7 +9,7 @@
  *  5. Assert the round-trip: the appended row is visible in the aggregate.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { openDb, appendRow, queryRows } from '@/lib/reputation/db'
+import { openDb, appendRow, queryRows, disputeRow } from '@/lib/reputation/db'
 import { redactIntent, type RawIntent } from '@/lib/reputation/redact'
 import { buildScorecards } from '@/lib/reputation/aggregate'
 import type { OutcomeRow } from '@/lib/reputation/aggregate'
@@ -169,5 +169,36 @@ describe('reputation e2e — append then query', () => {
       if (scorecards[7].state !== 'ok') continue
       expect(scorecards[7].sampleSize).toBe(3)
     }
+  })
+
+  it('disputed row is excluded from scorecard aggregates and cannot be set via appendRow', () => {
+    const anchor = 'anchor-dispute-test'
+    const intentA = makeRawIntent({ anchorId: anchor, amount: '50' })
+    const intentB = makeRawIntent({ anchorId: anchor, amount: '75' })
+
+    const rowA = makeOutcomeRow(redactIntent(intentA), { filled: true, recordedAt: daysAgo(1) })
+    const rowB = makeOutcomeRow(redactIntent(intentB), { filled: true, recordedAt: daysAgo(2) })
+
+    appendRow(db, rowA)
+    appendRow(db, rowB)
+
+    // Mark row B as disputed
+    disputeRow(db, rowB.intentHash, 'transaction never settled')
+
+    // Query scorecard
+    const scorecards = buildScorecards(queryRows(db, anchor), NOW)
+    expect(scorecards[7].state).toBe('ok')
+    if (scorecards[7].state !== 'ok') return
+
+    // Sample size should be 1, because row B is disputed and excluded from aggregates
+    expect(scorecards[7].sampleSize).toBe(1)
+    
+    // Check that we can't set disputed status via appendRow
+    const rowC = makeOutcomeRow(redactIntent(intentA), { intentHash: 'anotherhash', disputed: true, disputed_reason: 'fraud' })
+    appendRow(db, rowC)
+    const storedC = queryRows(db, anchor).find(r => r.intentHash === 'anotherhash')
+    expect(storedC).toBeDefined()
+    expect(storedC!.disputed).toBe(false)
+    expect(storedC!.disputed_reason).toBeNull()
   })
 })
