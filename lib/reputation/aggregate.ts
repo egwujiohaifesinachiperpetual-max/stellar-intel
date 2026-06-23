@@ -186,26 +186,7 @@ export function incrementalUpdate(
 // Outcome-row → rolling 7/30/90-day scorecards with p50/p95 settlement latency.
 // ─── Domain types ─────────────────────────────────────────────────────────────
 
-/**
- * A single outcome row written to the reputation log after a transaction
- * completes. All PII has already been stripped (see redact.ts).
- */
-export interface OutcomeRow {
-  intentHash: string
-  anchorId: string
-  /** Whether the transaction reached the "completed" state. */
-  filled: boolean
-  /** Settlement time in milliseconds (null when not yet settled). */
-  settleMs: number | null
-  /** Slippage as a decimal fraction, e.g. 0.02 = 2 % (null when unavailable). */
-  slippage: number | null
-  /** Unix timestamp (ms) when the row was recorded. */
-  recordedAt: number
-  /** Flag indicating if the outcome was disputed */
-  disputed?: boolean
-  /** Optional reason for dispute */
-  disputed_reason?: string
-}
+export type { OutcomeRow } from '@/types/reputation'
 
 /** Rolling window in days — 7, 30, or 90. */
 export type Window = 7 | 30 | 90
@@ -272,7 +253,7 @@ export function aggregate(
   nowMs: number = Date.now(),
 ): Scorecard {
   const cutoff = nowMs - windowDays * MS_PER_DAY
-  const windowRows = rows.filter((r) => r.recordedAt >= cutoff)
+  const windowRows = rows.filter((r) => r.recordedAt >= cutoff && !r.disputed)
 
   if (windowRows.length < MIN_SAMPLES) {
     return { state: 'insufficient_data', window: windowDays, sampleSize: windowRows.length }

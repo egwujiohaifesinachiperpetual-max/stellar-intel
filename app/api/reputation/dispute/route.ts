@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { Keypair } from '@stellar/stellar-sdk';
 import type { ApiError } from '@/types';
+import { outcomeStore } from '../[anchor]/route';
 
 const DisputeBodySchema = z.object({
   intentHash: z.string().regex(/^[0-9a-f]{64}$/, {
@@ -116,6 +117,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     createdAt: new Date().toISOString(),
   };
   disputes.set(record.id, record);
+
+  // Update the corresponding in-memory outcome row if it exists
+  const storeRow = outcomeStore.find((r) => r.intentHash === intentHash);
+  if (storeRow) {
+    storeRow.disputed = true;
+    storeRow.disputed_reason = reason;
+  }
 
   return NextResponse.json(record, { status: 201 });
 }

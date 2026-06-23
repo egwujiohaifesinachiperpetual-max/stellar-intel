@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3'
-import type { OutcomeRow } from './aggregate'
+import type { OutcomeRow } from '@/types/reputation'
 
 export type ReputationDb = InstanceType<typeof Database>
 
@@ -10,6 +10,8 @@ const CREATE_TABLE_SQL = `
     intentHash  TEXT    NOT NULL PRIMARY KEY,
     anchorId    TEXT    NOT NULL,
     filled      INTEGER NOT NULL,
+    settleMs    REAL,
+    slippage    REAL,
     disputed    BOOLEAN NOT NULL DEFAULT FALSE,
     disputed_reason TEXT,
     recordedAt  INTEGER NOT NULL
@@ -30,33 +32,31 @@ export function openDb(path: string = ':memory:'): ReputationDb {
 
 // ─── Write ────────────────────────────────────────────────────────────────────
 
-/**
- * Appends a single outcome row.
- * Uses INSERT OR REPLACE so re-processing the same intentHash is idempotent.
- */
 export function appendRow(db: ReputationDb, row: OutcomeRow): void {
   const stmt = db.prepare(`
-    INSERT OR REPLACE INTO outcome_rows
+    INSERT INTO outcome_rows
       (intentHash, anchorId, filled, settleMs, slippage, recordedAt, disputed, disputed_reason)
     VALUES
-      (@intentHash, @anchorId, @filled, @settleMs, @slippage, @recordedAt, @disputed, @disputed_reason)
+      (@intentHash, @anchorId, @filled, @settleMs, @slippage, @recordedAt, FALSE, NULL)
+    ON CONFLICT(intentHash) DO UPDATE SET
+      anchorId = excluded.anchorId,
+      filled = excluded.filled,
+      settleMs = excluded.settleMs,
+      slippage = excluded.slippage,
+      recordedAt = excluded.recordedAt
   `)
   stmt.run({
     ...row,
-    disputed: row.disputed ?? false,
-    disputed_reason: row.disputed_reason ?? null,
+    filled: row.filled ? 1 : 0,
   })
 }
 
 // ─── Read ─────────────────────────────────────────────────────────────────────
 
-/**
- * Returns all outcome rows for a given anchor, ordered by recordedAt ascending.
- */
 export function queryRows(db: ReputationDb, anchorId: string): OutcomeRow[] {
   const rows = db
     .prepare(
-      `SELECT intentHash, anchorId, filled, settleMs, slippage, recordedAt
+      `SELECT intentHash, anchorId, filled, settleMs, slippage, recordedAt, disputed, disputed_reason
        FROM outcome_rows
        WHERE anchorId = ?
        ORDER BY recordedAt ASC`,
@@ -68,6 +68,8 @@ export function queryRows(db: ReputationDb, anchorId: string): OutcomeRow[] {
     settleMs: number | null
     slippage: number | null
     recordedAt: number
+    disputed: number
+    disputed_reason: string | null
   }>
 
   return rows.map((r) => ({
@@ -76,4 +78,16 @@ export function queryRows(db: ReputationDb, anchorId: string): OutcomeRow[] {
     disputed: r.disputed === 1,
     disputed_reason: r.disputed_reason ?? null,
   }))
+}
+
+/**
+ * Sets the disputed flag and reason for a specific outcome row.
+ */
+export function disputeRow(db: ReputationDb, intentHash: string, reason: string): void {
+  const stmt = db.prepare(`
+    UPDATE outcome_rows
+    SET disputed = 1, disputed_reason = ?
+    WHERE intentHash = ?
+  `)
+  stmt.run(reason, intentHash)
 }

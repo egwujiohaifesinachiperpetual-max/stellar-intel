@@ -9,7 +9,8 @@ import {
 // ─── In-memory stores (seed / replace with DB in a later iteration) ───────────
 
 const SAMPLE_EVENTS: SettlementEvent[] = []
-const outcomeStore: OutcomeRow[] = []
+export const outcomeStore: OutcomeRow[] = []
+
 
 /** Exposed for testing and seeding only — not part of the public API surface. */
 export function _seedOutcomeStore(rows: OutcomeRow[]): void {

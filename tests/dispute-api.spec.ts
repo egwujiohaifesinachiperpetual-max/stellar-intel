@@ -165,4 +165,64 @@ describe('POST /api/reputation/dispute', () => {
     expect((await POST(makeRequest(base1))).status).toBe(429);
     expect((await POST(makeRequest(base2))).status).toBe(201);
   });
+
+  it('excludes disputed rows from GET /api/reputation/[anchor] scorecards', async () => {
+    const { outcomeStore } = await import('@/app/api/reputation/[anchor]/route');
+    const { GET } = await import('@/app/api/reputation/[anchor]/route');
+
+    // Seed the store with two outcome rows
+    const hashA = makeIntentHash();
+    const hashB = 'b'.repeat(64);
+    
+    outcomeStore.length = 0;
+    outcomeStore.push(
+      {
+        intentHash: hashA,
+        anchorId: 'moneygram',
+        filled: true,
+        settleMs: 5000,
+        slippage: 0.01,
+        recordedAt: Date.now() - 1000,
+      },
+      {
+        intentHash: hashB,
+        anchorId: 'moneygram',
+        filled: true,
+        settleMs: 10000,
+        slippage: 0.02,
+        recordedAt: Date.now() - 2000,
+      }
+    );
+
+    // Verify initially they are both in the scorecard (sample size = 2)
+    const getReq1 = new NextRequest('http://localhost/api/reputation/moneygram');
+    const resGet1 = await GET(getReq1, { params: Promise.resolve({ anchor: 'moneygram' }) });
+    const bodyGet1 = await resGet1.json();
+    expect(bodyGet1.scorecards[7].sampleSize).toBe(2);
+
+    // Now dispute hashB
+    const signature = signHash(keypair, hashB);
+    const resDispute = await POST(
+      makeRequest({
+        intentHash: hashB,
+        publicKey: keypair.publicKey(),
+        signature,
+        anchorId: 'moneygram',
+        reason: 'transaction never settled',
+      })
+    );
+    expect(resDispute.status).toBe(201);
+
+    // Verify hashB is now marked disputed in outcomeStore
+    const rowB = outcomeStore.find(r => r.intentHash === hashB);
+    expect(rowB?.disputed).toBe(true);
+    expect(rowB?.disputed_reason).toBe('transaction never settled');
+
+    // Query scorecard again, should only include hashA (sample size = 1)
+    const getReq2 = new NextRequest('http://localhost/api/reputation/moneygram');
+    const resGet2 = await GET(getReq2, { params: Promise.resolve({ anchor: 'moneygram' }) });
+    const bodyGet2 = await resGet2.json();
+    expect(bodyGet2.scorecards[7].sampleSize).toBe(1);
+  });
 });
+
