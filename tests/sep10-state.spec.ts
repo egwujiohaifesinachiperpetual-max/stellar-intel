@@ -211,7 +211,13 @@ describe('SEP-10 state machine — exchange', () => {
         capturedBody = JSON.parse(opts.body as string)
       }
 
-      if (capturedMethod === 'POST' && url.includes(WEB_AUTH_ENDPOINT)) {
+      const requestUrl = new URL(url)
+      const webAuthUrl = new URL(WEB_AUTH_ENDPOINT)
+      const isWebAuthEndpoint =
+        requestUrl.origin === webAuthUrl.origin &&
+        requestUrl.pathname.replace(/\/+$/, '') === webAuthUrl.pathname.replace(/\/+$/, '')
+
+      if (capturedMethod === 'POST' && isWebAuthEndpoint) {
         return {
           ok: true,
           json: async () => ({
