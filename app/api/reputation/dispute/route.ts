@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { Keypair } from '@stellar/stellar-sdk';
+import { withRequestLogger } from '@/lib/logger';
 import type { ApiError } from '@/types';
 import { outcomeStore } from '../[anchor]/route';
 
@@ -62,68 +63,70 @@ export function clearDisputeStores(): void {
 // ─── Route handler ────────────────────────────────────────────────────────────
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json<ApiError>(
-      { code: 'INVALID_JSON', message: 'Request body must be valid JSON' },
-      { status: 400 }
-    );
-  }
+  return withRequestLogger(request, 'api.reputation.dispute', async (logger) => {
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      logger.warn({ event: 'invalid_json', message: 'Request body must be valid JSON' });
+      return NextResponse.json<ApiError>(
+        { code: 'INVALID_JSON', message: 'Request body must be valid JSON' },
+        { status: 400 }
+      );
+    }
 
-  const parsed = DisputeBodySchema.safeParse(body);
-  if (!parsed.success) {
-    return NextResponse.json<ApiError>(
-      { code: 'VALIDATION_ERROR', message: parsed.error.issues[0]?.message ?? 'Validation failed' },
-      { status: 422 }
-    );
-  }
+    const parsed = DisputeBodySchema.safeParse(body);
+    if (!parsed.success) {
+      logger.warn({ event: 'validation_failed', issues: parsed.error.issues });
+      return NextResponse.json<ApiError>(
+        { code: 'VALIDATION_ERROR', message: parsed.error.issues[0]?.message ?? 'Validation failed' },
+        { status: 422 }
+      );
+    }
 
-  const { intentHash, publicKey, signature, anchorId, reason } = parsed.data;
+    const { intentHash, publicKey, signature, anchorId, reason } = parsed.data;
 
-  // Verify Ed25519 proof: signature over the raw intentHash bytes
-  let valid = false;
-  try {
-    const keypair = Keypair.fromPublicKey(publicKey);
-    const messageBytes = Buffer.from(intentHash, 'hex');
-    const sigBytes = Buffer.from(signature, 'base64');
-    valid = keypair.verify(messageBytes, sigBytes);
-  } catch {
-    valid = false;
-  }
+    logger.info({ event: 'dispute_submission', anchorId, publicKey, intentHash });
 
-  if (!valid) {
-    return NextResponse.json<ApiError>(
-      { code: 'FORBIDDEN', message: 'Signature verification failed' },
-      { status: 403 }
-    );
-  }
+    // Verify Ed25519 proof: signature over the raw intentHash bytes
+    let valid = false;
+    try {
+      const keypair = Keypair.fromPublicKey(publicKey);
+      const messageBytes = Buffer.from(intentHash, 'hex');
+      const sigBytes = Buffer.from(signature, 'base64');
+      valid = keypair.verify(messageBytes, sigBytes);
+    } catch {
+      valid = false;
+    }
 
-  if (!checkDisputeRateLimit(publicKey)) {
-    return NextResponse.json<ApiError>(
-      { code: 'RATE_LIMITED', message: 'Dispute limit of 10 per 24 h exceeded' },
-      { status: 429 }
-    );
-  }
+    if (!valid) {
+      logger.warn({ event: 'signature_verification_failed', publicKey, intentHash });
+      return NextResponse.json<ApiError>(
+        { code: 'FORBIDDEN', message: 'Signature verification failed' },
+        { status: 403 }
+      );
+    }
 
-  const record: DisputeRecord = {
-    id: `${publicKey.slice(0, 8)}-${intentHash.slice(0, 8)}-${Date.now()}`,
-    intentHash,
-    publicKey,
-    anchorId,
-    reason,
-    disputed: true,
-    createdAt: new Date().toISOString(),
-  };
-  disputes.set(record.id, record);
+    if (!checkDisputeRateLimit(publicKey)) {
+      logger.warn({ event: 'rate_limited', publicKey });
+      return NextResponse.json<ApiError>(
+        { code: 'RATE_LIMITED', message: 'Dispute limit of 10 per 24 h exceeded' },
+        { status: 429 }
+      );
+    }
 
-  // Update the corresponding in-memory outcome row if it exists
-  const storeRow = outcomeStore.find((r) => r.intentHash === intentHash);
-  if (storeRow) {
-    storeRow.disputed = true;
-    storeRow.disputed_reason = reason;
-  }
+    const record: DisputeRecord = {
+      id: `${publicKey.slice(0, 8)}-${intentHash.slice(0, 8)}-${Date.now()}`,
+      intentHash,
+      publicKey,
+      anchorId,
+      reason,
+      disputed: true,
+      createdAt: new Date().toISOString(),
+    };
+    disputes.set(record.id, record);
 
-  return NextResponse.json(record, { status: 201 });
+    logger.info({ event: 'dispute_created', disputeId: record.id });
+    return NextResponse.json(record, { status: 201 });
+  })
 }

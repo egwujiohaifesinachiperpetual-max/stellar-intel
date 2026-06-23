@@ -4,6 +4,10 @@
  * Asserts that the hook's two refresh mechanisms — the SWR interval and the
  * near-expiry watcher — both honour document visibility and the pause signal
  * that hiding the tab produces.
+ *
+ * The hook sources its data from the client-side rates engine
+ * (`fetchRates`), so the engine is mocked and refresh activity is asserted by
+ * counting calls to it.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -17,6 +21,13 @@ import {
   EXPIRY_POLL_INTERVAL_MS,
 } from '@/hooks/useAnchorRates';
 import type { RateComparison } from '@/types';
+import { fetchRates } from '@/lib/stellar/rates-engine';
+
+vi.mock('@/lib/stellar/rates-engine', () => ({
+  fetchRates: vi.fn(),
+}));
+
+const ratesMock = vi.mocked(fetchRates);
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -39,6 +50,7 @@ function makeMockRates(updatedAt: Date): RateComparison {
   return {
     corridorId: 'usdc-ngn',
     bestRateId: 'cowrie',
+    pending: [],
     rates: [
       {
         anchorId: 'cowrie',
@@ -55,14 +67,9 @@ function makeMockRates(updatedAt: Date): RateComparison {
   };
 }
 
-function fetchOk(updatedAt: Date) {
-  return vi.fn(async () => ({
-    ok: true,
-    json: async () => ({
-      rates: makeMockRates(updatedAt),
-      fetchedAt: new Date().toISOString(),
-    }),
-  }));
+/** Make the engine resolve with quotes carrying the given freshness. */
+function resolveWith(updatedAt: Date): void {
+  ratesMock.mockResolvedValue(makeMockRates(updatedAt));
 }
 
 function setDocumentHidden(hidden: boolean): void {
@@ -86,6 +93,7 @@ async function flushMicrotasks(): Promise<void> {
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  ratesMock.mockReset();
   setDocumentHidden(false);
 });
 
@@ -99,15 +107,14 @@ afterEach(() => {
 describe('rates refresh — SWR interval respects visibility', () => {
   it('does not tick the 30-second SWR interval while the tab is hidden', async () => {
     vi.useFakeTimers();
-    const fetchMock = fetchOk(new Date());
-    vi.stubGlobal('fetch', fetchMock);
+    resolveWith(new Date());
 
     renderHook(() => useAnchorRates('usdc-ngn', '100'), { wrapper });
 
     // Initial fetch on mount
     await flushMicrotasks();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    fetchMock.mockClear();
+    expect(ratesMock).toHaveBeenCalledTimes(1);
+    ratesMock.mockClear();
 
     // Hide the tab
     await dispatchVisibilityChange(true);
@@ -117,64 +124,60 @@ describe('rates refresh — SWR interval respects visibility', () => {
       vi.advanceTimersByTime(90_000);
     });
 
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(ratesMock).not.toHaveBeenCalled();
   });
 
   it('immediately re-fetches when the tab becomes visible again', async () => {
     vi.useFakeTimers();
-    const fetchMock = fetchOk(new Date());
-    vi.stubGlobal('fetch', fetchMock);
+    resolveWith(new Date());
 
     renderHook(() => useAnchorRates('usdc-ngn', '100'), { wrapper });
 
     await flushMicrotasks();
-    fetchMock.mockClear();
+    ratesMock.mockClear();
 
     // Hide, advance time, then un-hide
     await dispatchVisibilityChange(true);
     await act(async () => {
       vi.advanceTimersByTime(60_000);
     });
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(ratesMock).not.toHaveBeenCalled();
 
     await dispatchVisibilityChange(false);
     await flushMicrotasks();
 
     // A single catch-up fetch should fire on visibility restore
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(ratesMock).toHaveBeenCalledTimes(1);
   });
 
   it('resumes the normal 30-second cadence after the tab becomes visible', async () => {
     vi.useFakeTimers();
-    const fetchMock = fetchOk(new Date());
-    vi.stubGlobal('fetch', fetchMock);
+    resolveWith(new Date());
 
     renderHook(() => useAnchorRates('usdc-ngn', '100'), { wrapper });
 
     await flushMicrotasks();
-    fetchMock.mockClear();
+    ratesMock.mockClear();
 
     // Hide then restore
     await dispatchVisibilityChange(true);
     await dispatchVisibilityChange(false);
     await flushMicrotasks();
-    fetchMock.mockClear();
+    ratesMock.mockClear();
 
     // Next 30-second cycle should fire now that tab is visible
     await act(async () => {
       vi.advanceTimersByTime(30_000);
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(ratesMock).toHaveBeenCalledTimes(1);
   });
 
   it('does not fetch at all when the tab starts hidden', async () => {
     vi.useFakeTimers();
     // Set hidden BEFORE the hook mounts
     setDocumentHidden(true);
-
-    const fetchMock = fetchOk(new Date());
-    vi.stubGlobal('fetch', fetchMock);
+    resolveWith(new Date());
 
     renderHook(() => useAnchorRates('usdc-ngn', '100'), { wrapper });
 
@@ -183,7 +186,7 @@ describe('rates refresh — SWR interval respects visibility', () => {
       vi.advanceTimersByTime(60_000);
     });
 
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(ratesMock).not.toHaveBeenCalled();
   });
 });
 
@@ -198,23 +201,22 @@ describe('rates refresh — near-expiry watcher respects visibility', () => {
         Date.now() - (QUOTE_VALIDITY_MS - REFRESH_THRESHOLD_MS + 1_000)
       );
 
-      vi.stubGlobal('fetch', fetchOk(staleUpdatedAt));
+      resolveWith(staleUpdatedAt);
       const { result } = renderHook(() => useAnchorRates('usdc-ngn', '100'), {
         wrapper: watcherWrapper,
       });
       await waitFor(() => expect(result.current.rates).toBeDefined());
 
-      // Hide the tab, then install a spy for any watcher-triggered refresh
+      // Hide the tab, then watch for any watcher-triggered refresh
       await dispatchVisibilityChange(true);
-      const hiddenFetch = fetchOk(new Date());
-      vi.stubGlobal('fetch', hiddenFetch);
+      ratesMock.mockClear();
 
       // Wait 3 poll cycles — watcher must not fire while hidden
       await new Promise((resolve) =>
         setTimeout(resolve, EXPIRY_POLL_INTERVAL_MS * 3 + 100)
       );
 
-      expect(hiddenFetch).not.toHaveBeenCalled();
+      expect(ratesMock).not.toHaveBeenCalled();
     },
     EXPIRY_POLL_INTERVAL_MS * 7
   );
@@ -226,7 +228,7 @@ describe('rates refresh — near-expiry watcher respects visibility', () => {
         Date.now() - (QUOTE_VALIDITY_MS - REFRESH_THRESHOLD_MS + 1_000)
       );
 
-      vi.stubGlobal('fetch', fetchOk(staleUpdatedAt));
+      resolveWith(staleUpdatedAt);
       const { result } = renderHook(() => useAnchorRates('usdc-ngn', '100'), {
         wrapper: watcherWrapper,
       });
@@ -234,17 +236,17 @@ describe('rates refresh — near-expiry watcher respects visibility', () => {
 
       // Hide: confirm no poll fires
       await dispatchVisibilityChange(true);
-      const hiddenFetch = fetchOk(new Date());
-      vi.stubGlobal('fetch', hiddenFetch);
+      ratesMock.mockClear();
       await new Promise((resolve) => setTimeout(resolve, EXPIRY_POLL_INTERVAL_MS * 2 + 100));
-      expect(hiddenFetch).not.toHaveBeenCalled();
+      expect(ratesMock).not.toHaveBeenCalled();
 
-      // Restore visibility — watcher should resume and trigger within 1 poll cycle
-      const visibleFetch = fetchOk(new Date());
-      vi.stubGlobal('fetch', visibleFetch);
+      // Restore visibility — watcher resumes and triggers a refresh. Fresh data
+      // from this point settles the quote so the watcher quiesces.
+      ratesMock.mockClear();
+      resolveWith(new Date());
       await dispatchVisibilityChange(false);
 
-      await waitFor(() => expect(visibleFetch).toHaveBeenCalledTimes(1), {
+      await waitFor(() => expect(ratesMock).toHaveBeenCalled(), {
         timeout: EXPIRY_POLL_INTERVAL_MS * 3 + 500,
       });
     },
@@ -254,7 +256,7 @@ describe('rates refresh — near-expiry watcher respects visibility', () => {
   it(
     'watcher interval is torn down when tab is hidden (clearInterval called)',
     async () => {
-      vi.stubGlobal('fetch', fetchOk(new Date()));
+      resolveWith(new Date());
       const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
 
       const { result } = renderHook(() => useAnchorRates('usdc-ngn', '100'), {

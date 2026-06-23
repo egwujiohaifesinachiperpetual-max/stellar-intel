@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import useSWR from 'swr';
-import type { ApiRatesResponse, AnchorRate, RateComparison } from '@/types';
+import useSWR, { useSWRConfig } from 'swr';
+import { measureClient } from '@/lib/metrics';
+import type { AnchorRate, RateComparison } from '@/types';
+import { fetchRates } from '@/lib/stellar/rates-engine';
 
 const RATES_REFRESH_INTERVAL_MS = 30_000;
 
@@ -23,6 +25,8 @@ export const REFRESH_THRESHOLD_MS = 5_000;
  */
 export const EXPIRY_POLL_INTERVAL_MS = 1_000;
 
+type RatesKey = ['rates', string, string];
+
 function getVisibilitySnapshot(): boolean {
   return typeof document === 'undefined' || !document.hidden;
 }
@@ -38,47 +42,72 @@ function useDocumentVisible(): boolean {
   return useSyncExternalStore(subscribeToVisibilityChange, getVisibilitySnapshot, () => true);
 }
 
-async function fetcher(
-  [, corridorId, amount]: [string, string, string],
-  { signal }: { signal?: AbortSignal } = {}
-): Promise<RateComparison> {
-  const url = new URL('/api/rates', window.location.origin);
-  url.searchParams.set('corridor', corridorId);
-  url.searchParams.set('amount', amount);
-
-  const res = await fetch(url.toString(), { signal });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error((err as { message?: string }).message ?? `HTTP ${res.status}`);
-  }
-
-  const data: ApiRatesResponse = await res.json();
-  return data.rates;
-}
-
 export interface UseAnchorRatesResult {
   rates: RateComparison | undefined;
   isLoading: boolean;
   error: string | undefined;
   mutate: () => Promise<void>;
   refreshInflight: boolean;
+  pauseRefresh: () => void;
+  resumeRefresh: () => void;
 }
 
 export function useAnchorRates(corridorId: string, amount: string): UseAnchorRatesResult {
   const [refreshInflight, setRefreshInflight] = useState(false);
+  const { mutate: globalMutate } = useSWRConfig();
   const isDocumentVisible = useDocumentVisible();
   const wasDocumentVisible = useRef(isDocumentVisible);
   const hasRateQuery = Boolean(corridorId && amount);
-  const swrKey: [string, string, string] | null =
-    hasRateQuery && isDocumentVisible ? ['/api/rates', corridorId, amount] : null;
+  const swrKey: RatesKey | null =
+    hasRateQuery && isDocumentVisible ? ['rates', corridorId, amount] : null;
 
-  const { data, error, isLoading, mutate } = useSWR<RateComparison, Error>(swrKey, fetcher, {
-    refreshInterval: RATES_REFRESH_INTERVAL_MS,
-    refreshWhenHidden: false,
-    revalidateOnFocus: true,
-    dedupingInterval: 5_000,
-  });
+  // Data source: client-side rates engine (Promise.race timeout + partial results).
+  // Anchors that beat the timeout are returned immediately; slower anchors stay in
+  // `pending` and are injected into the SWR cache via `onQuoteArrived` as they
+  // resolve in the background (Issue #173) — no polling or layout shift.
+  const { data, error, isLoading, mutate } = useSWR<RateComparison, Error>(
+    swrKey,
+    ([, cid, amt]: RatesKey) =>
+      measureClient(
+        'quote_fetch_latency',
+        () =>
+          fetchRates(cid, amt, {
+            onQuoteArrived: (quote: AnchorRate) => {
+              void globalMutate(
+                ['rates', cid, amt],
+                (current: RateComparison | undefined) => {
+                  if (!current) return current;
+                  // Avoid duplicates if a refresh already landed this anchor.
+                  if (current.rates.some((r) => r.anchorId === quote.anchorId)) {
+                    return current;
+                  }
+                  const newPending = current.pending.filter(
+                    (p) => p.anchorId !== quote.anchorId
+                  );
+                  const newRates = [...current.rates, quote];
+                  const best = newRates.reduce((a, b) =>
+                    (b.totalReceived ?? 0) > (a.totalReceived ?? 0) ? b : a
+                  );
+                  return {
+                    ...current,
+                    pending: newPending,
+                    rates: newRates,
+                    bestRateId: best.anchorId,
+                  };
+                },
+                { revalidate: false }
+              );
+            },
+          }),
+        { anchorId: cid }
+      ),
+    {
+      refreshInterval: RATES_REFRESH_INTERVAL_MS,
+      refreshWhenHidden: false,
+      revalidateOnFocus: true,
+      dedupingInterval: 5_000,
+    }
+  );
 
   useEffect(() => {
     if (!wasDocumentVisible.current && isDocumentVisible && hasRateQuery) {
@@ -154,7 +183,7 @@ export function useAnchorRates(corridorId: string, amount: string): UseAnchorRat
   }, [data, refreshInflight]);
 
   const refresh = useCallback(async () => {
-    if (refreshInflight) return;
+    if (refreshInflight || refreshPausedRef.current) return;
 
     setRefreshInflight(true);
 
@@ -175,5 +204,7 @@ export function useAnchorRates(corridorId: string, amount: string): UseAnchorRat
     error: error?.message,
     mutate: refresh,
     refreshInflight,
+    pauseRefresh,
+    resumeRefresh,
   };
 }
